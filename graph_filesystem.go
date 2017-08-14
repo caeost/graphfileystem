@@ -1,12 +1,13 @@
 package graphfileystem
 
 import (
+	"fmt"
 	"io"
 )
 
 func New(input map[string]io.Reader) impl {
 	i := impl{
-		root:   &node{[]byte{}, false, map[byte]*node{}},
+		root:   &node{[]byte{}, 0, map[byte]*node{}},
 		lookup: map[string]*[]byte{},
 	}
 
@@ -36,15 +37,15 @@ type GraphFilesystem interface {
 	Insert(name string, file io.Reader)
 	Copy(target, name string) (ok bool)
 	Delete(target string) (ok bool)
-	Find(target string) (contents []byte, ok bool)
+	Get(target string) (contents []byte, ok bool)
+	Search(pcontents []byte) map[string][]byte
 	List() map[string][]byte
 }
 
 type node struct {
 	value []byte // technically don't need the first byte of each value since its in the parent but don't want to think of a compact version right now (interface{}{}?)
-	// set is only necessary during building, could be removed after
-	// could maybe even be removed by logic inside of Insert keeping track of what is not "set"
-	set      bool // "set" means that the node has a complete definition in it / its children. aka adding another element to it could make an invalid previous file
+	// could maybe even be removed by logic inside of Insert keeping track of what is not "reffed"
+	refs     int // "ref" means that the node has a complete definition in it / its children. aka adding another element to it could make an invalid previous file
 	children map[byte]*node
 }
 
@@ -86,8 +87,27 @@ func (i *impl) Insert(name string, file io.Reader) {
 						-> find and update all the paths using this node
 						-> make another child containing the current byte value
 						-> use the current byte's node as your node
-		"set" the node
+		"ref" the node
 	*/
+
+	splitNode := func(n *node, at int, path []byte) {
+		expected := n.value[at]
+		existingC := n.children
+
+		// create two nodes now, one for old case one for new
+		// reset n
+		n.children = map[byte]*node{}
+		// copy all children and references from node to this child
+		n.children[expected] = &node{n.value[at:], n.refs, existingC}
+		// set value of parent just to the common beginning
+		n.value = n.value[:at]
+
+		// now need to add this fork to the lookup for the old one(s)
+		users := i.partialFind(path)
+		for name, u := range users {
+			i.lookup[name] = insertPath(u, len(path), expected)
+		}
+	}
 
 	p := make([]byte, 1)                                                                  // read one byte at a time y'all, this gets repeatedly overwritten so we can't use it the node creations below
 	for nread, err := file.Read(p); nread != 0 || err == nil; nread, err = file.Read(p) { // complicated error EOF condition here: https://golang.org/pkg/io/#Reader
@@ -95,51 +115,41 @@ func (i *impl) Insert(name string, file io.Reader) {
 			b := p[0] // more convenient to work with
 
 			// first file in will only hit this state, it will write all of it into root
-			if !current.set { // means that no finished file depends on the value of this node yet
+			if current.refs == 0 { // means that no finished file depends on the value of this node yet
 				current.value = append(current.value, b)
+				cursor++
 			} else if cursor < len(current.value) && b == current.value[cursor] { // It is in the value
 				cursor++ // we can continue adding to the same node... for now
 			} else if current.children[b] != nil { // It is in the children
-				current = current.children[b]
-				path = append(path, b)
 				cursor = 1
+				current.refs++
+				path = append(path, b)
+				current = current.children[b]
 			} else { // It is in neither
-				if cursor >= len(current.value) { // It is because the node's value isn't long enough
-					current.children[b] = &node{[]byte{b}, false, map[byte]*node{}}
-					current = current.children[b]
-					path = append(path, b)
-					cursor = 0
-				} else { // It is because the next byte in the node's value is different
-					expected := current.value[cursor]
-					existingC := current.children
-
-					// create two nodes now, one for old case one for new
-					// reset
-					current.children = map[byte]*node{}
-					// copy all children from node to this child
-					current.children[expected] = &node{current.value[cursor:], true, existingC}
-					current.value = current.value[:cursor]
-
-					// now need to add this fork to the lookup for the old one(s)
-					users := i.partialFind(path)
-					for name, u := range users {
-						i.lookup[name] = insertPath(u, len(path), expected)
-					}
-
-					current.children[b] = &node{[]byte{b}, false, map[byte]*node{}}
-
-					cursor = 0
-					current.set = true
-					path = append(path, b)
-					// at this point we start writing an entirely other branch to the tree
-					// would be nice to be able to merge back to what was common later, hard though!
-					current = current.children[b]
+				if cursor < len(current.value) { // It is because the next byte in the node's value is different
+					splitNode(current, cursor, path)
 				}
+				// If the node's value isn't long enough we just have to add another child
+
+				// add the new child to the set of children
+				current.children[b] = &node{[]byte{b}, 0, map[byte]*node{}}
+				// at this point we start writing an entirely other branch to the tree
+				// would be nice to be able to merge back to what was common later, hard though!
+				current = current.children[b]
+				cursor = 0
+				current.refs++
+				path = append(path, b)
 			}
 		}
 	}
 
-	current.set = true
+	if cursor < len(current.value) { // current node is actually longer then we need
+		splitNode(current, cursor, path)
+	}
+
+	current.refs++
+
+	fmt.Printf("%v\n", current)
 
 	i.lookup[name] = &path
 }
@@ -175,6 +185,10 @@ func insertPath(path *[]byte, at int, value byte) *[]byte {
 
 // O(1)
 func (i *impl) Copy(target, name string) bool {
+	if target == name { // cannot copy into same name
+		return false
+	}
+
 	v, ok := i.lookup[target]
 
 	if !ok {
@@ -202,7 +216,7 @@ func (i *impl) Delete(target string) bool {
 
 // Note: may have to use pointer here for large situations anyway depending on what the obj looks like
 // O(something)
-func (i impl) Find(target string) ([]byte, bool) {
+func (i impl) Get(target string) ([]byte, bool) {
 	path, ok := i.lookup[target]
 
 	if !ok {
@@ -219,11 +233,18 @@ func (i impl) Find(target string) ([]byte, bool) {
 	return result, true
 }
 
+func (i impl) Search(pcontents []byte) map[string][]byte {
+	// extract node traversal from Insert and put it in helper function
+	// run the helper function on pcontents (partial contents) but without the deleting on existance / or saving to lookup
+	// get path and compare to other paths (partialFind) to find all files starting with pcontents
+	return map[string][]byte{}
+}
+
 func (i impl) List() map[string][]byte {
 	res := map[string][]byte{}
 
 	for name, _ := range i.lookup {
-		v, ok := i.Find(name)
+		v, ok := i.Get(name)
 
 		if !ok {
 			panic("Inconsistent file system!")

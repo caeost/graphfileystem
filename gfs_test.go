@@ -9,7 +9,7 @@ import (
 func TestReadFiles(t *testing.T) {
 	input := map[string]io.Reader{
 		"abc":  NewMockFile("abc"),
-		"abb":  NewMockFile("abb"),
+		"abb":  NewMockFile("a"),
 		"aaa":  NewMockFile("aaa"),
 		"aaaa": NewMockFile("aaaaa"),
 		"ooo":  NewMockFile("abc"),
@@ -48,7 +48,7 @@ func TestReadFiles(t *testing.T) {
 			l = append(l, n)
 		}
 
-		fmt.Println("[", string(x.value), ",", x.set, ",", string(names), "]")
+		fmt.Println("[", string(x.value), ",", x.refs, ",", string(names), "]")
 	}
 
 	if len(gfs.lookup) != 5 {
