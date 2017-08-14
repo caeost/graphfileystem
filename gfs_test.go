@@ -68,9 +68,10 @@ func printNodes(gfs impl) {
 	}
 }
 
-func printPaths(gfs impl) {
+func printLookups(gfs impl) {
+	fmt.Println("lookups")
 	for k, v := range gfs.lookup {
-		fmt.Println(k, string(*v))
+		fmt.Println(k, string(*v.path), v.length)
 	}
 }
 

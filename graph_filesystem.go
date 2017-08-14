@@ -8,7 +8,7 @@ import (
 func New(input map[string]io.Reader) impl {
 	i := impl{
 		root:   &node{[]byte{}, 0, map[byte]*node{}},
-		lookup: map[string]*[]byte{},
+		lookup: map[string]*lookerup{},
 		strict: false,
 	}
 
@@ -45,7 +45,7 @@ type GraphFilesystem interface {
 
 type impl struct {
 	root    *node
-	lookup  map[string]*[]byte
+	lookup  map[string]*lookerup
 	strict  bool
 	Cleaned chan bool
 }
@@ -101,13 +101,16 @@ func (i *impl) Insert(name string, file io.Reader) {
 		// now need to add this fork to the lookup for the old one(s)
 		users := i.partialFind(path)
 		for name, u := range users {
-			i.lookup[name] = insertPath(u, len(path), expected)
+			lookup := i.lookup[name]
+			lookup.path = insertPath(u, len(path), expected)
 		}
 	}
 
+	length := 0
 	p := make([]byte, 1)                                                                  // read one byte at a time y'all, this gets repeatedly overwritten so we can't use it the node creations below
 	for nread, err := file.Read(p); nread != 0 || err == nil; nread, err = file.Read(p) { // complicated error EOF condition here: https://golang.org/pkg/io/#Reader
 		if nread > 0 { // we have something to process!
+			length++
 			b := p[0] // more convenient to work with
 
 			// first file in will only hit this state, it will write all of it into root
@@ -129,12 +132,13 @@ func (i *impl) Insert(name string, file io.Reader) {
 
 				// add the new child to the set of children
 				current.children[b] = &node{[]byte{b}, 0, map[byte]*node{}}
-				// at this point we start writing an entirely other branch to the tree
-				// would be nice to be able to merge back to what was common later, hard though!
-				current = current.children[b]
+
 				cursor = 0
 				current.refs++
 				path = append(path, b)
+				// at this point we start writing an entirely other branch to the tree
+				// would be nice to be able to merge back to what was common later, hard though!
+				current = current.children[b]
 			}
 		}
 	}
@@ -145,12 +149,13 @@ func (i *impl) Insert(name string, file io.Reader) {
 
 	current.refs++
 
-	i.lookup[name] = &path
+	i.lookup[name] = &lookerup{&path, length}
 }
 
 func (i impl) partialFind(path []byte) map[string]*[]byte {
 	ret := map[string]*[]byte{}
-	for name, pat := range i.lookup {
+	for name, lookup := range i.lookup {
+		pat := lookup.path
 		ok := true // clean this up later ugh
 		l := len(*pat)
 		for k, v := range path {
@@ -183,20 +188,26 @@ func (i *impl) Copy(target, name string) bool {
 		return false
 	}
 
-	v, ok := i.lookup[target]
+	lookup, ok := i.lookup[target]
 
 	if !ok {
 		return false
 	}
 
-	i.lookup[name] = v
+	i.lookup[name] = &lookerup{lookup.path, lookup.length} // must be some way to copy structs?
+
+	n := i.root
+	for _, b := range *lookup.path {
+		n.refs++
+		n = n.children[b]
+	}
 
 	return true
 }
 
 // O(1)
 func (i *impl) Delete(target string) bool {
-	path, ok := i.lookup[target]
+	lookup, ok := i.lookup[target]
 
 	if !ok {
 		return false
@@ -204,21 +215,20 @@ func (i *impl) Delete(target string) bool {
 
 	delete(i.lookup, target)
 	// we should probably clean up the node state, maybe in a goroutine
-	go i.cleanup(*path) // might be some concurrency issues around cleaning up, mutex in cleanup? https://blog.golang.org/go-maps-in-action#TOC_6.
+	go i.cleanup(*lookup.path) // might be some concurrency issues around cleaning up, mutex in cleanup? https://blog.golang.org/go-maps-in-action#TOC_6.
 
 	return true
 }
 
 func (i *impl) cleanup(path []byte) {
-	var parent *node = nil
-	n := i.root
-
 	if i.strict {
 		defer func() {
 			i.Cleaned <- true
 		}()
 	}
 
+	var parent *node = nil
+	n := i.root
 	var v byte
 	for _, b := range path {
 		v = b
@@ -249,17 +259,24 @@ func (i *impl) cleanup(path []byte) {
 // Note: may have to use pointer here for large situations anyway depending on what the obj looks like
 // O(something)
 func (i impl) Get(target string) ([]byte, bool) {
-	path, ok := i.lookup[target]
+	lookup, ok := i.lookup[target]
 
 	if !ok {
 		return nil, false
 	}
 
-	result := append([]byte{}, i.root.value...) // should probably store length and preallocate this, or do it incrementally some way
 	node := i.root
-	for _, b := range *path {
+
+	cursor := 0
+	result := make([]byte, lookup.length)
+
+	copy(result, node.value)
+	cursor += len(node.value)
+
+	for _, b := range *lookup.path {
 		node = node.children[b]
-		result = append(result, node.value...)
+		copy(result[cursor:], node.value)
+		cursor += len(node.value)
 	}
 
 	return result, true
@@ -288,10 +305,10 @@ func (i impl) List() map[string][]byte {
 	return res
 }
 
-func NewStrict(input map[string]io.Reader) impl {
+func NewStrict(input map[string]io.Reader) impl { // todo: avoid duplication, put underneath New()
 	i := impl{
 		root:    &node{[]byte{}, 0, map[byte]*node{}},
-		lookup:  map[string]*[]byte{},
+		lookup:  map[string]*lookerup{},
 		strict:  true,
 		Cleaned: make(chan bool),
 	}
@@ -301,6 +318,11 @@ func NewStrict(input map[string]io.Reader) impl {
 	}
 
 	return i
+}
+
+type lookerup struct {
+	path   *[]byte
+	length int
 }
 
 type node struct {
