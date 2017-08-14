@@ -6,26 +6,34 @@ import (
 	"testing"
 )
 
-func TestReadFile(t *testing.T) {
+func TestReadFiles(t *testing.T) {
 	input := map[string]io.Reader{
-		"abc": NewMockFile("abc"),
-		"abb": NewMockFile("abb"),
-		"aaa": NewMockFile("aaa"),
-		"ooo": NewMockFile("abc"),
+		"abc":  NewMockFile("abc"),
+		"abb":  NewMockFile("abb"),
+		"aaa":  NewMockFile("aaa"),
+		"aaaa": NewMockFile("aaaaa"),
+		"ooo":  NewMockFile("abc"),
 	}
 
 	gfs := New(input)
-
-	files := gfs.List()
 
 	fmt.Println("paths")
 	for k, v := range gfs.lookup {
 		fmt.Println(k, string(*v))
 	}
 
+	files := gfs.List()
 	fmt.Println("file names and contents")
 	for k, v := range files {
 		fmt.Println(k, string(v))
+
+		// ec := make([]byte, len(v))
+		// n, err := input[k].Read(ec)
+		// if string(v) != string(ec) || n != len(v) || err != io.EOF {
+		// 	t.Error("Incorrect contents for", k,
+		// 		"should be", string(ec),
+		// 		"but is", v)
+		// }
 	}
 
 	fmt.Println("nodes")
@@ -43,8 +51,8 @@ func TestReadFile(t *testing.T) {
 		fmt.Println("[", string(x.value), ",", x.set, ",", string(names), "]")
 	}
 
-	if len(gfs.lookup) != 4 {
-		t.Error("Wrong number of lookups, expected", 4, "got", len(gfs.lookup))
+	if len(gfs.lookup) != 5 {
+		t.Error("Wrong number of lookups, expected", 5, "got", len(gfs.lookup))
 	}
 }
 

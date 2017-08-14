@@ -1,7 +1,6 @@
 package graphfileystem
 
 import (
-	"fmt"
 	"io"
 )
 
@@ -44,6 +43,7 @@ type GraphFilesystem interface {
 type node struct {
 	value []byte // technically don't need the first byte of each value since its in the parent but don't want to think of a compact version right now (interface{}{}?)
 	// set is only necessary during building, could be removed after
+	// could maybe even be removed by logic inside of Insert keeping track of what is not "set"
 	set      bool // "set" means that the node has a complete definition in it / its children. aka adding another element to it could make an invalid previous file
 	children map[byte]*node
 }
@@ -54,7 +54,6 @@ type impl struct {
 }
 
 func (i *impl) Insert(name string, file io.Reader) {
-	fmt.Println("insert", name)
 	// inserting same named file means ovewriting so delete old version
 	if _, ok := i.lookup[name]; ok {
 		i.Delete(name)
@@ -94,31 +93,24 @@ func (i *impl) Insert(name string, file io.Reader) {
 	for nread, err := file.Read(p); nread != 0 || err == nil; nread, err = file.Read(p) { // complicated error EOF condition here: https://golang.org/pkg/io/#Reader
 		if nread > 0 { // we have something to process!
 			b := p[0] // more convenient to work with
-			fmt.Println("read:", string([]byte{b}))
 
 			// first file in will only hit this state, it will write all of it into root
 			if !current.set { // means that no finished file depends on the value of this node yet
-				fmt.Println("current node not \"set\", appending", string([]byte{b}), "to", string(current.value))
 				current.value = append(current.value, b)
 			} else if cursor < len(current.value) && b == current.value[cursor] { // It is in the value
-				fmt.Println("Cursor is at position", cursor, "in", string(current.value), "which equals", string([]byte{b}))
 				cursor++ // we can continue adding to the same node... for now
 			} else if current.children[b] != nil { // It is in the children
-				fmt.Println("Current node has child starting with", string([]byte{b}))
 				current = current.children[b]
 				path = append(path, b)
 				cursor = 1
 			} else { // It is in neither
-				fmt.Println(string([]byte{b}), "does not match at this position")
 				if cursor >= len(current.value) { // Is it because the node's value isn't long enough?
-					fmt.Println("Current node is too short, adding a child node for", string([]byte{b}))
 					current.children[b] = &node{[]byte{b}, false, map[byte]*node{}}
 					current = current.children[b]
 					path = append(path, b)
 					cursor = 0
 				} else { // Is it because the next byte in the node's value is different?
 					expected := current.value[cursor]
-					fmt.Println("Current cursor value", string([]byte{expected}), "!=", string([]byte{b}))
 					existingC := current.children
 
 					// create two nodes now, one for old case one for new
@@ -144,7 +136,6 @@ func (i *impl) Insert(name string, file io.Reader) {
 					current = current.children[b]
 				}
 			}
-			fmt.Println("current path", string(path))
 		}
 	}
 
@@ -175,11 +166,9 @@ func (i impl) partialFind(path []byte) map[string]*[]byte {
 }
 
 func insertPath(path *[]byte, at int, value byte) *[]byte {
-	pre := string(*path)
 	p := append(*path, 0)
 	copy(p[at+1:], p[at:])
 	p[at] = value
-	fmt.Println("Path insert", string([]byte{value}), "at", at, "in", pre, "giving", string(p))
 
 	return &p
 }
