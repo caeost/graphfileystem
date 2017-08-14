@@ -1,15 +1,18 @@
 package graphfileystem
 
-import "io"
+import (
+	"fmt"
+	"io"
+)
 
-func New(input map[string]*io.Reader) impl {
+func New(input map[string]io.Reader) impl {
 	i := impl{
 		root:   &node{[]byte{}, false, map[byte]*node{}},
 		lookup: map[string]*[]byte{},
 	}
 
 	for name, file := range input {
-		i.Insert(name, *file) // pointer deref here?
+		i.Insert(name, file) // pointer deref here?
 	}
 
 	return i
@@ -31,10 +34,11 @@ func New(input map[string]*io.Reader) impl {
 
 // main interface
 type GraphFilesystem interface {
-	Find(target string) (file io.Reader, ok bool)
-	Delete(target string) (ok bool)
-	Copy(target, name string) (ok bool)
 	Insert(name string, file io.Reader)
+	Copy(target, name string) (ok bool)
+	Delete(target string) (ok bool)
+	Find(target string) (contents []byte, ok bool)
+	List() map[string][]byte
 }
 
 type node struct {
@@ -50,6 +54,7 @@ type impl struct {
 }
 
 func (i *impl) Insert(name string, file io.Reader) {
+	fmt.Println("insert", name)
 	// inserting same named file means ovewriting so delete old version
 	if _, ok := i.lookup[name]; ok {
 		i.Delete(name)
@@ -58,7 +63,7 @@ func (i *impl) Insert(name string, file io.Reader) {
 	current := i.root
 	cursor := 0
 
-	pattern := []byte{}
+	path := []byte{}
 
 	/*
 		Okay so what is happening here?
@@ -79,107 +84,170 @@ func (i *impl) Insert(name string, file io.Reader) {
 					Is it because the next byte in the node's value is different?
 						-> Split the node at this cursor position
 						-> make the remainder a new node as a child of the current node
-						-> find and update all the patterns using this node
+						-> find and update all the paths using this node
 						-> make another child containing the current byte value
 						-> use the current byte's node as your node
 		"set" the node
 	*/
 
-	p := make([]byte, 1)                                        // read one byte at a time y'all, this gets repeatedly overwritten so we can't use it the node creations below
-	for nread, err := file.Read(p); nread != 0 || err == nil; { // complicated error EOF condition here: https://golang.org/pkg/io/#Reader
+	p := make([]byte, 1)                                                                  // read one byte at a time y'all, this gets repeatedly overwritten so we can't use it the node creations below
+	for nread, err := file.Read(p); nread != 0 || err == nil; nread, err = file.Read(p) { // complicated error EOF condition here: https://golang.org/pkg/io/#Reader
 		if nread > 0 { // we have something to process!
 			b := p[0] // more convenient to work with
+			fmt.Println("read:", string([]byte{b}))
 
 			// first file in will only hit this state, it will write all of it into root
 			if !current.set { // means that no finished file depends on the value of this node yet
+				fmt.Println("current node not \"set\", appending", string([]byte{b}), "to", string(current.value))
 				current.value = append(current.value, b)
 			} else if cursor < len(current.value) && b == current.value[cursor] { // It is in the value
+				fmt.Println("Cursor is at position", cursor, "in", string(current.value), "which equals", string([]byte{b}))
 				cursor++ // we can continue adding to the same node... for now
 			} else if current.children[b] != nil { // It is in the children
-				cursor = 1
-
+				fmt.Println("Current node has child starting with", string([]byte{b}))
 				current = current.children[b]
-
-				pattern = append(pattern, b)
+				path = append(path, b)
+				cursor = 1
 			} else { // It is in neither
+				fmt.Println(string([]byte{b}), "does not match at this position")
 				if cursor >= len(current.value) { // Is it because the node's value isn't long enough?
+					fmt.Println("Current node is too short, adding a child node for", string([]byte{b}))
 					current.children[b] = &node{[]byte{b}, false, map[byte]*node{}}
 					current = current.children[b]
-					pattern = append(pattern, b)
+					path = append(path, b)
 					cursor = 0
 				} else { // Is it because the next byte in the node's value is different?
 					expected := current.value[cursor]
+					fmt.Println("Current cursor value", string([]byte{expected}), "!=", string([]byte{b}))
 					existingC := current.children
 
 					// create two nodes now, one for old case one for new
 					// reset
 					current.children = map[byte]*node{}
 					// copy all children from node to this child
-					current.children[expected] = &node{current.value[:cursor], true, existingC}
+					current.children[expected] = &node{current.value[cursor:], true, existingC}
+					current.value = current.value[:cursor]
 
 					// now need to add this fork to the lookup for the old one(s)
-					users := i.partialFind(pattern)
-					for _, u := range users {
-						insertPath(u, len(pattern), expected)
+					users := i.partialFind(path)
+					for name, u := range users {
+						i.lookup[name] = insertPath(u, len(path), expected)
 					}
 
 					current.children[b] = &node{[]byte{b}, false, map[byte]*node{}}
 
 					cursor = 0
 					current.set = true
-					pattern = append(pattern, b)
+					path = append(path, b)
 					// at this point we start writing an entirely other branch to the tree
 					// would be nice to be able to merge back to what was common later, hard though!
 					current = current.children[b]
 				}
 			}
+			fmt.Println("current path", string(path))
 		}
 	}
 
 	current.set = true
 
-	i.lookup[name] = &pattern
+	i.lookup[name] = &path
 }
 
-func (i impl) partialFind(pattern []byte) []*[]byte {
-	ret := []*[]byte{}
-	for _, pat := range i.lookup {
+func (i impl) partialFind(path []byte) map[string]*[]byte {
+	ret := map[string]*[]byte{}
+	for name, pat := range i.lookup {
 		ok := true // clean this up later ugh
-		for k, v := range pattern {
+		l := len(*pat)
+		for k, v := range path {
 			p := *pat
-			if p[k] != v {
+			if k >= l || p[k] != v {
 				ok = false
 				break
 			}
 		}
 
 		if ok {
-			ret = append(ret, pat)
+			ret[name] = pat
 		}
 	}
 
 	return ret
 }
 
-func insertPath(path *[]byte, at int, value byte) {
-	// do that blah blah
+func insertPath(path *[]byte, at int, value byte) *[]byte {
+	pre := string(*path)
+	p := append(*path, 0)
+	copy(p[at+1:], p[at:])
+	p[at] = value
+	fmt.Println("Path insert", string([]byte{value}), "at", at, "in", pre, "giving", string(p))
+
+	return &p
 }
 
+// O(1)
 func (i *impl) Copy(target, name string) bool {
-	return false
+	v, ok := i.lookup[target]
+
+	if !ok {
+		return false
+	}
+
+	i.lookup[name] = v
+
+	return true
 }
 
+// O(1)
 func (i *impl) Delete(target string) bool {
-	return false
+	_, ok := i.lookup[target]
+
+	if !ok {
+		return false
+	}
+
+	delete(i.lookup, target)
+	// we should probably clean up the node state, maybe in a goroutine
+
+	return true
 }
 
 // Note: may have to use pointer here for large situations anyway depending on what the obj looks like
-func (i impl) Find(target string) bool {
-	return false
+// O(something)
+func (i impl) Find(target string) ([]byte, bool) {
+	path, ok := i.lookup[target]
+
+	if !ok {
+		return nil, false
+	}
+
+	result := append([]byte{}, i.root.value...) // should probably store length and preallocate this, or do it incrementally some way
+	node := i.root
+	for _, b := range *path {
+		node = node.children[b]
+		result = append(result, node.value...)
+	}
+
+	return result, true
+}
+
+func (i impl) List() map[string][]byte {
+	res := map[string][]byte{}
+
+	for name, _ := range i.lookup {
+		v, ok := i.Find(name)
+
+		if !ok {
+			panic("Inconsistent file system!")
+		}
+
+		res[name] = v
+	}
+
+	return res
 }
 
 // type Reader interface {
 //         Read(p []byte) (n int, err error)
 // }
 // Read 1 byte at a time into the array (might be more efficient to read more and do logic on our side to process down, or wrap Reader implementors)
-type files map[string]*io.Reader
+type files map[string]io.Reader
