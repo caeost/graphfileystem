@@ -1,14 +1,15 @@
 package graphfileystem
 
 import (
-	"fmt"
 	"io"
+	"strconv"
 )
 
 func New(input map[string]io.Reader) impl {
 	i := impl{
 		root:   &node{[]byte{}, 0, map[byte]*node{}},
 		lookup: map[string]*[]byte{},
+		strict: false,
 	}
 
 	for name, file := range input {
@@ -42,16 +43,11 @@ type GraphFilesystem interface {
 	List() map[string][]byte
 }
 
-type node struct {
-	value []byte // technically don't need the first byte of each value since its in the parent but don't want to think of a compact version right now (interface{}{}?)
-	// could maybe even be removed by logic inside of Insert keeping track of what is not "reffed"
-	refs     int // "ref" means that the node has a complete definition in it / its children. aka adding another element to it could make an invalid previous file
-	children map[byte]*node
-}
-
 type impl struct {
-	root   *node
-	lookup map[string]*[]byte
+	root    *node
+	lookup  map[string]*[]byte
+	strict  bool
+	Cleaned chan bool
 }
 
 func (i *impl) Insert(name string, file io.Reader) {
@@ -149,8 +145,6 @@ func (i *impl) Insert(name string, file io.Reader) {
 
 	current.refs++
 
-	fmt.Printf("%v\n", current)
-
 	i.lookup[name] = &path
 }
 
@@ -202,7 +196,7 @@ func (i *impl) Copy(target, name string) bool {
 
 // O(1)
 func (i *impl) Delete(target string) bool {
-	_, ok := i.lookup[target]
+	path, ok := i.lookup[target]
 
 	if !ok {
 		return false
@@ -210,8 +204,46 @@ func (i *impl) Delete(target string) bool {
 
 	delete(i.lookup, target)
 	// we should probably clean up the node state, maybe in a goroutine
+	go i.cleanup(*path) // might be some concurrency issues around cleaning up, mutex in cleanup? https://blog.golang.org/go-maps-in-action#TOC_6.
 
 	return true
+}
+
+func (i *impl) cleanup(path []byte) {
+	var parent *node = nil
+	n := i.root
+
+	if i.strict {
+		defer func() {
+			i.Cleaned <- true
+		}()
+	}
+
+	var v byte
+	for _, b := range path {
+		v = b
+		n.refs--
+		parent = n
+		n = n.children[b]
+	}
+
+	if n.refs == 1 && parent != nil {
+		delete(parent.children, v)
+
+		if len(parent.children) == 1 { // maybe heal split
+			var b byte
+			for k, _ := range parent.children { // this is kinda dumb
+				b = k
+			}
+
+			child := parent.children[b]
+			if parent.refs == child.refs { // heal split
+				parent.children = child.children
+				parent.value = append(parent.value, child.value...)
+			}
+		}
+		// if we go to a graph and not a trie then we can't return here, we have to decrement refs all the way down
+	}
 }
 
 // Note: may have to use pointer here for large situations anyway depending on what the obj looks like
@@ -256,8 +288,52 @@ func (i impl) List() map[string][]byte {
 	return res
 }
 
+func NewStrict(input map[string]io.Reader) impl {
+	i := impl{
+		root:    &node{[]byte{}, 0, map[byte]*node{}},
+		lookup:  map[string]*[]byte{},
+		strict:  true,
+		Cleaned: make(chan bool),
+	}
+
+	for name, file := range input {
+		i.Insert(name, file) // pointer deref here?
+	}
+
+	return i
+}
+
+type node struct {
+	value []byte // technically don't need the first byte of each value since its in the parent but don't want to think of a compact version right now (interface{}{}?)
+	// could maybe even be removed by logic inside of Insert keeping track of what is not "reffed"
+	refs     int // "ref" means that the node has a complete definition in it / its children. aka adding another element to it could make an invalid previous file
+	children map[byte]*node
+}
+
+func (m node) String() string { // implement Stringer for debugging
+	names := []byte{}
+	for c, _ := range m.children {
+		names = append(names, c)
+	}
+	return "[" + string(m.value) + ", " + strconv.Itoa(m.refs) + ", [" + joinBytes(names) + "]]"
+}
+
 // type Reader interface {
 //         Read(p []byte) (n int, err error)
 // }
 // Read 1 byte at a time into the array (might be more efficient to read more and do logic on our side to process down, or wrap Reader implementors)
 type files map[string]io.Reader
+
+func joinBytes(bytes []byte) string {
+	s := ""
+	for _, v := range bytes {
+		s += string(v) + ","
+	}
+
+	l := len(s)
+	if l > 1 {
+		return s[:l-1]
+	} else {
+		return ""
+	}
+}
