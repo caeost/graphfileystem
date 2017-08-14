@@ -104,12 +104,12 @@ func (i *impl) Insert(name string, file io.Reader) {
 				path = append(path, b)
 				cursor = 1
 			} else { // It is in neither
-				if cursor >= len(current.value) { // Is it because the node's value isn't long enough?
+				if cursor >= len(current.value) { // It is because the node's value isn't long enough
 					current.children[b] = &node{[]byte{b}, false, map[byte]*node{}}
 					current = current.children[b]
 					path = append(path, b)
 					cursor = 0
-				} else { // Is it because the next byte in the node's value is different?
+				} else { // It is because the next byte in the node's value is different
 					expected := current.value[cursor]
 					existingC := current.children
 
